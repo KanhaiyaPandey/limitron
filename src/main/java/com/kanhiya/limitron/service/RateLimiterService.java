@@ -184,15 +184,20 @@ public class RateLimiterService {
 
         String member = nowMillis + ":" + Long.toUnsignedString(ThreadLocalRandom.current().nextLong());
 
-        Long result = stringRedisTemplate.execute(
-                allowRequestSlidingWindowScript,
-                List.of(key),
-                String.valueOf(limit),
-                String.valueOf(SLIDING_WINDOW_SIZE.toMillis()),
-                String.valueOf(nowMillis),
-                member,
-                String.valueOf(SLIDING_WINDOW_TTL.toSeconds())
-        );
+        Long result;
+        try {
+            result = stringRedisTemplate.execute(
+                    allowRequestSlidingWindowScript,
+                    List.of(key),
+                    String.valueOf(limit),
+                    String.valueOf(SLIDING_WINDOW_SIZE.toMillis()),
+                    String.valueOf(nowMillis),
+                    member,
+                    String.valueOf(SLIDING_WINDOW_TTL.toSeconds())
+            );
+        } catch (RuntimeException ex) {
+            return false;
+        }
 
         return result != null && result == 1L;
     }
@@ -203,13 +208,18 @@ public class RateLimiterService {
 
         double refillRatePerSecond = refillRatePerSecond(maxTokens, DEFAULT_LIMIT_WINDOW);
 
-        Long result = stringRedisTemplate.execute(
-                allowRequestScript,
-                List.of(key),
-                String.valueOf(maxTokens),
-                String.valueOf(refillRatePerSecond),
-                String.valueOf(now)
-        );
+        Long result;
+        try {
+            result = stringRedisTemplate.execute(
+                    allowRequestScript,
+                    List.of(key),
+                    String.valueOf(maxTokens),
+                    String.valueOf(refillRatePerSecond),
+                    String.valueOf(now)
+            );
+        } catch (RuntimeException ex) {
+            return false;
+        }
 
         return result != null && result == 1L;
     }
