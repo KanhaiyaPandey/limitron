@@ -1,4 +1,18 @@
 spring:
-  redis:
-    host: localhost
-    port: 6379
+  main:
+    web-application-type: reactive
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: backend-service
+              uri: ${limitron.gateway.backend-uri:http://localhost:8081}
+              predicates:
+                - Path=/api/**
+              filters:
+                - RateLimiter
