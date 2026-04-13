@@ -29,12 +29,14 @@ public class RateLimiterGatewayFilterFactory extends AbstractGatewayFilterFactor
     @Override
     public GatewayFilter apply(Config config) {
         String headerName = StringUtils.hasText(config.getUserIdHeader()) ? config.getUserIdHeader() : DEFAULT_USER_ID_HEADER;
+        String stripPrefix = StringUtils.hasText(config.getStripPrefix()) ? config.getStripPrefix() : "";
 
         return (exchange, chain) -> {
             HttpHeaders headers = exchange.getRequest().getHeaders();
             String userId = headers.getFirst(headerName);
+            String endpoint = extractEndpoint(exchange.getRequest().getPath().value(), stripPrefix);
 
-            return Mono.fromCallable(() -> rateLimiterService.allowRequest(userId))
+            return Mono.fromCallable(() -> rateLimiterService.allowRequest(userId, endpoint))
                     .subscribeOn(Schedulers.boundedElastic())
                     .flatMap(allowed -> {
                         if (allowed) {
@@ -52,11 +54,12 @@ public class RateLimiterGatewayFilterFactory extends AbstractGatewayFilterFactor
 
     @Override
     public List<String> shortcutFieldOrder() {
-        return List.of("userIdHeader");
+        return List.of("userIdHeader", "stripPrefix");
     }
 
     public static class Config {
         private String userIdHeader = DEFAULT_USER_ID_HEADER;
+        private String stripPrefix = "/api";
 
         public String getUserIdHeader() {
             return userIdHeader;
@@ -65,6 +68,36 @@ public class RateLimiterGatewayFilterFactory extends AbstractGatewayFilterFactor
         public void setUserIdHeader(String userIdHeader) {
             this.userIdHeader = userIdHeader;
         }
+
+        public String getStripPrefix() {
+            return stripPrefix;
+        }
+
+        public void setStripPrefix(String stripPrefix) {
+            this.stripPrefix = stripPrefix;
+        }
+    }
+
+    private static String extractEndpoint(String path, String stripPrefix) {
+        if (!StringUtils.hasText(path)) {
+            return null;
+        }
+        String normalizedPath = path.trim();
+        if (!normalizedPath.startsWith("/")) {
+            normalizedPath = "/" + normalizedPath;
+        }
+        String normalizedPrefix = stripPrefix == null ? "" : stripPrefix.trim();
+        if (StringUtils.hasText(normalizedPrefix)) {
+            if (!normalizedPrefix.startsWith("/")) {
+                normalizedPrefix = "/" + normalizedPrefix;
+            }
+            if (normalizedPath.equals(normalizedPrefix)) {
+                return "/";
+            }
+            if (normalizedPath.startsWith(normalizedPrefix + "/")) {
+                return normalizedPath.substring(normalizedPrefix.length());
+            }
+        }
+        return normalizedPath;
     }
 }
-

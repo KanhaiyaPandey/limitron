@@ -16,3 +16,10 @@ spring:
                 - Path=/api/**
               filters:
                 - RateLimiter
+
+limitron:
+  rate-limiter:
+    default-limit: 10
+    endpoint-limits:
+      /login: 5
+      /search: 50
