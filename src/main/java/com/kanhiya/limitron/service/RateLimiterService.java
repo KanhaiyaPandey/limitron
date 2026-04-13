@@ -1,18 +1,15 @@
 package com.kanhiya.limitron.service;
 
-import com.kanhiya.limitron.model.TokenBucket;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
+import java.util.List;
 
-/**
- * Core rate limiter service based on a token bucket stored in Redis.
- */
 @Service
 public class RateLimiterService {
 
@@ -20,10 +17,61 @@ public class RateLimiterService {
     private static final int REFILL_RATE = 1;
     private static final Duration TOKEN_BUCKET_TTL = Duration.ofHours(1);
 
-    private final RedisTemplate<String, Object> redisTemplate;
+    private static final String RATE_LIMITER_LUA_TEMPLATE = """
+            -- KEYS[1] = rate_limiter:{userId}
+            -- ARGV[1] = maxTokens
+            -- ARGV[2] = refillRate (tokens per second)
+            -- ARGV[3] = currentTime (epoch seconds)
+            local key = KEYS[1]
+            local maxTokens = tonumber(ARGV[1])
+            local refillRate = tonumber(ARGV[2])
+            local now = tonumber(ARGV[3])
 
-    public RateLimiterService(RedisTemplate<String, Object> redisTemplate) {
-        this.redisTemplate = redisTemplate;
+            local value = redis.call('GET', key)
+            local tokens = maxTokens
+            local lastRefillTime = now
+
+            if value then
+              local t, l = string.match(value, "^(%-?%d+):(%-?%d+)$")
+              if t and l then
+                tokens = tonumber(t)
+                lastRefillTime = tonumber(l)
+              end
+            end
+
+            if tokens == nil or lastRefillTime == nil then
+              tokens = maxTokens
+              lastRefillTime = now
+            end
+
+            if now > lastRefillTime then
+              local elapsed = now - lastRefillTime
+              local refill = elapsed * refillRate
+              tokens = math.min(maxTokens, tokens + refill)
+              lastRefillTime = now
+            end
+
+            local allowed = 0
+            if tokens > 0 then
+              tokens = tokens - 1
+              allowed = 1
+            end
+
+            redis.call('SET', key, tostring(tokens) .. ":" .. tostring(lastRefillTime))
+            redis.call('EXPIRE', key, __TTL_SECONDS__)
+            return allowed
+            """;
+
+    private final StringRedisTemplate stringRedisTemplate;
+    private final RedisScript<Long> allowRequestScript;
+
+    public RateLimiterService(StringRedisTemplate stringRedisTemplate) {
+        this.stringRedisTemplate = stringRedisTemplate;
+        String lua = RATE_LIMITER_LUA_TEMPLATE.replace("__TTL_SECONDS__", String.valueOf(TOKEN_BUCKET_TTL.toSeconds()));
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+        script.setResultType(Long.class);
+        script.setScriptText(lua);
+        this.allowRequestScript = script;
     }
 
     public boolean allowRequest(String userId) {
@@ -31,63 +79,17 @@ public class RateLimiterService {
             return false;
         }
 
-        String key = "rate_limiter:" + userId.trim();
-        ValueOperations<String, Object> ops = redisTemplate.opsForValue();
-
-        TokenBucket bucket = getTokenBucket(key, ops.get(key));
+        String key = "rate_limiter:{" + userId.trim() + "}";
         long now = Instant.now().getEpochSecond();
 
-        // Refill tokens based on elapsed time
-        long elapsed = now - bucket.getLastRefillTime();
-        if (elapsed > 0) {
-            long refill = elapsed * REFILL_RATE;
-            int updatedTokens = (int) Math.min(MAX_TOKENS, bucket.getTokens() + refill);
-            bucket.setTokens(updatedTokens);
-        }
+        Long result = stringRedisTemplate.execute(
+                allowRequestScript,
+                List.of(key),
+                String.valueOf(MAX_TOKENS),
+                String.valueOf(REFILL_RATE),
+                String.valueOf(now)
+        );
 
-        if (bucket.getTokens() > 0) {
-            bucket.setTokens(bucket.getTokens() - 1);
-            bucket.setLastRefillTime(now);
-            ops.set(key, bucket, TOKEN_BUCKET_TTL);
-            return true;
-        }
-
-        return false;
-    }
-
-    private TokenBucket getTokenBucket(String key, Object storedValue) {
-        if (storedValue instanceof TokenBucket tokenBucket) {
-            return tokenBucket;
-        }
-
-        if (storedValue instanceof Map<?, ?> map) {
-            Integer tokens = toInteger(map.get("tokens"));
-            Long lastRefillTime = toLong(map.get("lastRefillTime"));
-            if (tokens != null && lastRefillTime != null) {
-                return new TokenBucket(tokens, lastRefillTime);
-            }
-        }
-
-        return new TokenBucket(MAX_TOKENS, Instant.now().getEpochSecond());
-    }
-
-    private Integer toInteger(Object value) {
-        if (value instanceof Integer i) {
-            return i;
-        }
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        return null;
-    }
-
-    private Long toLong(Object value) {
-        if (value instanceof Long l) {
-            return l;
-        }
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        return null;
+        return result != null && result == 1L;
     }
 }
